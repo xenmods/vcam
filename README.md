@@ -1,5 +1,7 @@
 # VCam
 
+[![Showcase](https://img.youtube.com/vi/EzAjuX5gfyM/maxresdefault.jpg)](https://www.youtube.com/watch?v=EzAjuX5gfyM)
+
 Control Minecraft using your phone — gyro, touch, and joystick for full camera override, with live screen stream.
 
 Two components:

@@ -4,7 +4,7 @@ Control Minecraft using your phone — gyro, touch, and joystick for full camera
 
 Two components:
 
-- **vcam-bootstrap.exe** — Windows launcher that downloads go2rtc + ffmpeg, generates a TLS cert, and serves the mobile web UI
+- **vcam.exe** — Windows launcher that downloads go2rtc + ffmpeg, generates a TLS cert, and serves the mobile web UI
 - **vcam-mod.jar** — Fabric mod for Minecraft 1.21.1 that receives phone input over WebSocket and overrides the in-game camera
 
 ---
@@ -20,7 +20,7 @@ Place `vcam-mod-<version>+mc1.21.1.jar` in your Minecraft `mods/` folder (requir
 On your Windows PC, run:
 
 ```powershell
-vcam-bootstrap.exe
+vcam.exe
 ```
 
 It downloads go2rtc + ffmpeg on first run. You'll be asked: *Enable screen capture? [Y/n]* — say `n` on low-end PCs.
@@ -43,7 +43,7 @@ Get the latest from [Releases](https://github.com/xenmods/vcam/releases).
 
 | File | What it is |
 |------|-----------|
-| `vcam-bootstrap-<version>.exe` | Windows launcher (single binary, ~7 MB) |
+| `vcam-<version>.exe` | Windows launcher (single binary, ~7 MB) |
 | `vcam-mod-<version>+mc1.21.1.jar` | Fabric mod for Minecraft 1.21.1 |
 
 ---
@@ -53,21 +53,10 @@ Get the latest from [Releases](https://github.com/xenmods/vcam/releases).
 ### Bootstrap (Windows)
 
 ```powershell
-go build -o vcam-bootstrap.exe -ldflags="-s -w" .
+go build -o vcam.exe -ldflags="-s -w" .
 ```
 
 Requires Go 1.26+. The webapp is pre-built and embedded — no Node.js needed.
-
-### Mod (any OS)
-
-```bash
-cd mod
-./gradlew build
-```
-
-Output: `mod/build/libs/vcam-mod-<version>+mc1.21.1.jar`
-
-Requires JDK 21 and Fabric Loom.
 
 ---
 

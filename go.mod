@@ -1,3 +1,3 @@
-module github.com/YOUR_USER/vcam-bootstrap
+module github.com/xenmods/vcam
 
 go 1.26

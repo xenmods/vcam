@@ -22,6 +22,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	qrcode "github.com/skip2/go-qrcode"
 )
 
 //go:embed webapp/*
@@ -103,8 +105,9 @@ func printBanner() {
 }
 
 func printConnectionInfo() {
+	url := "https://" + lanIP + ":" + strconv.Itoa(httpPort) + "/"
 	fmt.Println("  ───────────────────────────────────────────")
-	fmt.Println("   📱  https://" + lanIP + ":" + strconv.Itoa(httpPort) + "/")
+	fmt.Println("   📱  " + url)
 	fmt.Println("   🎮  wss://" + lanIP + ":" + strconv.Itoa(wsPort))
 	if !captureEnabled {
 		fmt.Println()
@@ -112,7 +115,13 @@ func printConnectionInfo() {
 	}
 	fmt.Println("  ───────────────────────────────────────────")
 	fmt.Println("   Make sure Minecraft is running with VCam mod")
-	fmt.Println("  ───────────────────────────────────────────")
+	fmt.Println("  ═══════════════════════════════════════════")
+	qr, err := qrcode.New(url, qrcode.Medium)
+	if err == nil {
+		fmt.Println(qr.ToSmallString(false))
+	}
+	fmt.Println("  ═══════════════════════════════════════════")
+	fmt.Println("   Scan QR code with your phone camera")
 	fmt.Println()
 }
 

@@ -398,7 +398,11 @@ func generateCert() error {
 	if err := writePEM(certPath, "CERTIFICATE", certDER); err != nil {
 		return err
 	}
-	if err := writePEM(keyPath, "RSA PRIVATE KEY", x509.MarshalPKCS1PrivateKey(key)); err != nil {
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		return err
+	}
+	if err := writePEM(keyPath, "PRIVATE KEY", keyDER); err != nil {
 		return err
 	}
 	return nil

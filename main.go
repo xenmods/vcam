@@ -521,13 +521,11 @@ streams:
   tls_key: %s
   origin: "*"
   static_dir: %s
-  proxy:
-    /gyro: http://127.0.0.1:%d
 
 webrtc:
   candidates:
     - %s:%d
-`, streamSection, apiPort, httpPort, certPath, keyPath, staticDir, wsPort, lanIP, webrtcPort)
+`, streamSection, apiPort, httpPort, certPath, keyPath, staticDir, lanIP, webrtcPort)
 
 	return os.WriteFile(filepath.Join(workDir, go2rtcConfig), []byte(yaml), 0644)
 }

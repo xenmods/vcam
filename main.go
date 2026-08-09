@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"embed"
@@ -14,10 +15,13 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -30,16 +34,12 @@ import (
 var webappFS embed.FS
 
 const (
-	workDirName   = ".vcam"
-	go2rtcURL     = "https://github.com/AlexxIT/go2rtc/releases/latest/download/go2rtc_win64.zip"
-	go2rtcExe     = "go2rtc.exe"
-	go2rtcConfig  = "go2rtc.yaml"
-	certFile      = "cert.pem"
-	keyFile       = "key.pem"
-	httpPort      = 4321
-	apiPort       = 1984
-	webrtcPort    = 8555
-	wsPort        = 4322
+	httpPort     = 4321
+	apiPort      = 1984
+	webrtcPort   = 8555
+	certFile     = "cert.pem"
+	keyFile      = "key.pem"
+	go2rtcConfig = "go2rtc.yaml"
 )
 
 var workDir string
@@ -66,7 +66,7 @@ func main() {
 
 	if captureEnabled {
 		if err := ensureFFmpeg(); err != nil {
-			logWarn("ffmpeg", err.Error()+". Install: winget install Gyan.FFmpeg.Essentials")
+			logWarn("ffmpeg", err.Error()+". Install via your package manager or winget")
 		} else {
 			logOK("ffmpeg", "ready")
 		}
@@ -91,8 +91,19 @@ func main() {
 
 	printConnectionInfo()
 
-	if err := startGo2RTC(); err != nil {
+	cmd, err := startGo2RTC()
+	if err != nil {
 		fatal("go2rtc", err)
+	}
+
+	time.Sleep(500 * time.Millisecond)
+
+	if err := startHTTPSProxy(); err != nil {
+		fmt.Printf("  HTTPS proxy error: %v\n", err)
+	}
+
+	if cmd != nil && cmd.Process != nil {
+		cmd.Process.Kill()
 	}
 }
 
@@ -108,7 +119,6 @@ func printConnectionInfo() {
 	url := "https://" + lanIP + ":" + strconv.Itoa(httpPort) + "/"
 	fmt.Println("  ───────────────────────────────────────────")
 	fmt.Println("   📱  " + url)
-	fmt.Println("   🎮  wss://" + lanIP + ":" + strconv.Itoa(wsPort))
 	if !captureEnabled {
 		fmt.Println()
 		fmt.Println("   ⚠ Screen capture disabled (use Y/n on restart to enable)")
@@ -126,11 +136,46 @@ func printConnectionInfo() {
 }
 
 func getWorkDir() string {
-	base := os.Getenv("APPDATA")
-	if base == "" {
-		base = os.TempDir()
+	var base string
+	if runtime.GOOS == "windows" {
+		base = os.Getenv("APPDATA")
+		if base == "" {
+			base = os.TempDir()
+		}
+		return filepath.Join(base, ".vcam")
 	}
-	return filepath.Join(base, workDirName)
+
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+		base = xdg
+	} else {
+		home, _ := os.UserHomeDir()
+		base = filepath.Join(home, ".config")
+	}
+	return filepath.Join(base, "vcam")
+}
+
+func go2rtcBinaryName() string {
+	if runtime.GOOS == "windows" {
+		return "go2rtc.exe"
+	}
+	return "go2rtc"
+}
+
+func go2rtcDownloadURL() string {
+	if runtime.GOOS == "windows" {
+		return "https://github.com/AlexxIT/go2rtc/releases/latest/download/go2rtc_win64.zip"
+	}
+	if runtime.GOARCH == "arm64" {
+		return "https://github.com/AlexxIT/go2rtc/releases/latest/download/go2rtc_linux_arm64"
+	}
+	return "https://github.com/AlexxIT/go2rtc/releases/latest/download/go2rtc_linux_amd64"
+}
+
+func ffmpegBinaryName() string {
+	if runtime.GOOS == "windows" {
+		return "ffmpeg.exe"
+	}
+	return "ffmpeg"
 }
 
 func getLocalIP() string {
@@ -166,7 +211,6 @@ func getLocalIP() string {
 		}
 	}
 
-	// Prefer private IPs (LAN), fall back to any non-loopback IP
 	for _, c := range candidates {
 		if c.private {
 			return c.ip
@@ -215,12 +259,8 @@ func downloadFile(url, destPath string) error {
 	}
 	defer out.Close()
 
-	written, err := io.Copy(out, resp.Body)
-	if err != nil {
-		return err
-	}
-	_ = written
-	return nil
+	_, err = io.Copy(out, resp.Body)
+	return err
 }
 
 func extractZip(zipPath, destDir, wantExe string) error {
@@ -253,18 +293,28 @@ func extractZip(zipPath, destDir, wantExe string) error {
 }
 
 func ensureGo2RTC() error {
-	exePath := filepath.Join(workDir, go2rtcExe)
+	exePath := filepath.Join(workDir, go2rtcBinaryName())
 	if _, err := os.Stat(exePath); err == nil {
 		return nil
 	}
 
-	tmpZip := filepath.Join(workDir, "go2rtc.zip")
-	if err := downloadFile(go2rtcURL, tmpZip); err != nil {
-		return err
-	}
-	defer os.Remove(tmpZip)
+	if runtime.GOOS == "windows" {
+		tmpZip := filepath.Join(workDir, "go2rtc.zip")
+		if err := downloadFile(go2rtcDownloadURL(), tmpZip); err != nil {
+			return err
+		}
+		defer os.Remove(tmpZip)
 
-	return extractZip(tmpZip, workDir, go2rtcExe)
+		if err := extractZip(tmpZip, workDir, go2rtcBinaryName()); err != nil {
+			return err
+		}
+	} else {
+		if err := downloadFile(go2rtcDownloadURL(), exePath); err != nil {
+			return err
+		}
+	}
+
+	return os.Chmod(exePath, 0755)
 }
 
 const ffmpegURL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
@@ -275,27 +325,26 @@ func ffmpegSizeOK(path string) bool {
 }
 
 func findFFmpeg() string {
-	// Check work dir
-	p := filepath.Join(workDir, "ffmpeg.exe")
+	binName := ffmpegBinaryName()
+	p := filepath.Join(workDir, binName)
 	if ffmpegSizeOK(p) {
 		return p
 	}
-	// Check old temp location
-	p = filepath.Join(os.TempDir(), "opencode", "vcam", "ffmpeg.exe")
+	p = filepath.Join(os.TempDir(), "opencode", "vcam", binName)
 	if ffmpegSizeOK(p) {
 		return p
 	}
-	// Check PATH
 	if pp, err := exec.LookPath("ffmpeg"); err == nil && ffmpegSizeOK(pp) {
 		return pp
 	}
-	// Check winget location
-	locals := os.Getenv("LOCALAPPDATA")
-	if locals != "" {
-		matches, _ := filepath.Glob(filepath.Join(locals, "Microsoft", "WinGet", "Packages", "Gyan.FFmpeg.Essentials*", "ffmpeg.exe"))
-		for _, m := range matches {
-			if ffmpegSizeOK(m) {
-				return m
+	if runtime.GOOS == "windows" {
+		locals := os.Getenv("LOCALAPPDATA")
+		if locals != "" {
+			matches, _ := filepath.Glob(filepath.Join(locals, "Microsoft", "WinGet", "Packages", "Gyan.FFmpeg.Essentials*", "ffmpeg.exe"))
+			for _, m := range matches {
+				if ffmpegSizeOK(m) {
+					return m
+				}
 			}
 		}
 	}
@@ -303,6 +352,13 @@ func findFFmpeg() string {
 }
 
 func ensureFFmpeg() error {
+	if runtime.GOOS != "windows" {
+		if _, err := exec.LookPath("ffmpeg"); err != nil {
+			return fmt.Errorf("ffmpeg not found in PATH. Please install it (e.g. sudo apt install ffmpeg)")
+		}
+		return nil
+	}
+
 	exePath := filepath.Join(workDir, "ffmpeg.exe")
 	if ffmpegSizeOK(exePath) {
 		return nil
@@ -312,7 +368,6 @@ func ensureFFmpeg() error {
 		return copyFile(src, exePath)
 	}
 
-	// Auto-download ffmpeg
 	fmt.Println()
 	logInfo("Downloading ffmpeg (~70 MB)...")
 	tmpZip := filepath.Join(workDir, "ffmpeg.zip")
@@ -433,14 +488,13 @@ func loadExistingCert(certPath, keyPath string) bool {
 		if !time.Now().Before(cert.NotAfter) {
 			return false
 		}
-		// Verify the cert's IP SANs include the current LAN IP
 		if ip := net.ParseIP(lanIP); ip != nil && !ip.IsLoopback() {
 			for _, certIP := range cert.IPAddresses {
 				if certIP.Equal(ip) {
 					return true
 				}
 			}
-			return false // LAN IP not in cert SANs
+			return false
 		}
 		return true
 	}
@@ -510,14 +564,11 @@ func promptCapture() bool {
 }
 
 func writeConfig() error {
-	ffmpegBin := strings.ReplaceAll(filepath.Join(workDir, "ffmpeg.exe"), "\\", "/")
-	staticDir := strings.ReplaceAll(filepath.Join(workDir, "webapp"), "\\", "/")
-	certPath := strings.ReplaceAll(filepath.Join(workDir, certFile), "\\", "/")
-	keyPath := strings.ReplaceAll(filepath.Join(workDir, keyFile), "\\", "/")
-
 	streamSection := ""
 	if captureEnabled {
-		streamSection = fmt.Sprintf(`ffmpeg:
+		if runtime.GOOS == "windows" {
+			ffmpegBin := strings.ReplaceAll(filepath.Join(workDir, "ffmpeg.exe"), "\\", "/")
+			streamSection = fmt.Sprintf(`ffmpeg:
   bin: %s
   gdigrab: -framerate 15 -f gdigrab -i {input}
 
@@ -525,38 +576,48 @@ streams:
   mc: ffmpeg:desktop#video=h264#input=gdigrab
 
 `, ffmpegBin)
+		} else {
+			ffmpegPath, _ := exec.LookPath("ffmpeg")
+			if ffmpegPath == "" {
+				ffmpegPath = "ffmpeg"
+			}
+			streamSection = fmt.Sprintf(`ffmpeg:
+  bin: %s
+  x11grab: -framerate 15 -f x11grab -i {input}
+
+streams:
+  mc: ffmpeg::0.0#video=h264#input=x11grab
+
+`, ffmpegPath)
+		}
 	}
 
 	yaml := fmt.Sprintf(`%sapi:
-  listen: ":%d"
-  tls_listen: ":%d"
-  tls_cert: %s
-  tls_key: %s
+  listen: "localhost:%d"
   origin: "*"
-  static_dir: %s
 
 webrtc:
   candidates:
     - %s:%d
-`, streamSection, apiPort, httpPort, certPath, keyPath, staticDir, lanIP, webrtcPort)
+`, streamSection, apiPort, lanIP, webrtcPort)
 
 	return os.WriteFile(filepath.Join(workDir, go2rtcConfig), []byte(yaml), 0644)
 }
 
-func startGo2RTC() error {
-	cmd := exec.Command(filepath.Join(workDir, go2rtcExe), "-c", filepath.Join(workDir, go2rtcConfig))
+func startGo2RTC() (*exec.Cmd, error) {
+	cmd := exec.Command(filepath.Join(workDir, go2rtcBinaryName()), "-c", filepath.Join(workDir, go2rtcConfig))
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	if err := cmd.Start(); err != nil {
-		return err
+		return nil, err
 	}
 
 	fmt.Printf("  ▶ go2rtc running (PID %d)\n", cmd.Process.Pid)
@@ -567,22 +628,7 @@ func startGo2RTC() error {
 	go pipeOutput(stdout, done)
 	go pipeOutput(stderr, done)
 
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
-
-	<-sigCh
-	fmt.Println()
-	fmt.Println("  Shutting down...")
-	cmd.Process.Signal(os.Interrupt)
-
-	select {
-	case <-done:
-	case <-done:
-	case <-time.After(5 * time.Second):
-		cmd.Process.Kill()
-	}
-
-	return nil
+	return cmd, nil
 }
 
 func pipeOutput(rc io.ReadCloser, done chan<- struct{}) {
@@ -594,4 +640,104 @@ func pipeOutput(rc io.ReadCloser, done chan<- struct{}) {
 	for scanner.Scan() {
 		fmt.Println("  " + scanner.Text())
 	}
+}
+
+func startHTTPSProxy() error {
+	certPath := filepath.Join(workDir, certFile)
+	keyPath := filepath.Join(workDir, keyFile)
+
+	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+	if err != nil {
+		return err
+	}
+
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		proxyWebSocket(w, r, "localhost:4323")
+	})
+
+	go2rtcURL, _ := url.Parse(fmt.Sprintf("http://localhost:%d", apiPort))
+	go2rtcProxy := httputil.NewSingleHostReverseProxy(go2rtcURL)
+
+	go2rtcHandler := func(w http.ResponseWriter, r *http.Request) {
+		if isWebSocketUpgrade(r) {
+			proxyWebSocket(w, r, fmt.Sprintf("localhost:%d", apiPort))
+		} else {
+			go2rtcProxy.ServeHTTP(w, r)
+		}
+	}
+
+	mux.HandleFunc("/api/", go2rtcHandler)
+	mux.HandleFunc("/stream.html", go2rtcHandler)
+
+	webappHandler := http.FileServer(http.Dir(filepath.Join(workDir, "webapp")))
+	mux.Handle("/", webappHandler)
+
+	srv := &http.Server{
+		Addr:    fmt.Sprintf("0.0.0.0:%d", httpPort),
+		Handler: mux,
+		TLSConfig: &tls.Config{
+			Certificates: []tls.Certificate{cert},
+		},
+	}
+
+	go func() {
+		if err := srv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+			fatal("HTTPS Proxy", err)
+		}
+	}()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	<-sigCh
+	fmt.Println("\n  Shutting down HTTPS server...")
+	return srv.Close()
+}
+
+func isWebSocketUpgrade(r *http.Request) bool {
+	return strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade") &&
+		strings.ToLower(r.Header.Get("Upgrade")) == "websocket"
+}
+
+func proxyWebSocket(w http.ResponseWriter, r *http.Request, targetHost string) {
+	if !isWebSocketUpgrade(r) {
+		http.Error(w, "Not a websocket upgrade", http.StatusBadRequest)
+		return
+	}
+
+	targetConn, err := net.Dial("tcp", targetHost)
+	if err != nil {
+		http.Error(w, "Could not connect to backend", http.StatusBadGateway)
+		return
+	}
+	defer targetConn.Close()
+
+	hj, ok := w.(http.Hijacker)
+	if !ok {
+		http.Error(w, "Webserver doesn't support hijacking", http.StatusInternalServerError)
+		return
+	}
+	clientConn, bufrw, err := hj.Hijack()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer clientConn.Close()
+
+	if err := r.Write(targetConn); err != nil {
+		return
+	}
+
+	errc := make(chan error, 2)
+	go func() {
+		_, err := io.Copy(targetConn, bufrw)
+		errc <- err
+	}()
+	go func() {
+		_, err := io.Copy(clientConn, targetConn)
+		errc <- err
+	}()
+
+	<-errc
 }

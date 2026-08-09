@@ -1,2 +1,5 @@
 /vcam.exe
+/vcam-linux-amd64
+/vcam-linux-arm64
 *.exe~
+app.exe
